@@ -32,6 +32,7 @@ import cifar10_utils
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
 
 
 def accuracy(predictions, targets):
@@ -55,7 +56,9 @@ def accuracy(predictions, targets):
     #######################
     # PUT YOUR CODE HERE  #
     #######################
-
+    predictions = torch.argmax(predictions, dim=1)
+    # targets = torch.argmax(targets, dim=1)
+    accuracy = torch.mean((predictions == targets).float())
     #######################
     # END OF YOUR CODE    #
     #######################
@@ -83,7 +86,20 @@ def evaluate_model(model, data_loader):
     #######################
     # PUT YOUR CODE HERE  #
     #######################
+    device = model.device
+    total_accuracy = 0
+    total_samples = 0
 
+    with torch.no_grad():
+        for inputs_bacth, targets_batch in data_loader:
+            inputs_bacth = inputs_bacth.reshape(inputs_bacth.shape[0], -1).to(device)
+            targets_batch = targets_batch.to(device)
+
+            predictions = model(inputs_bacth)
+            total_accuracy += accuracy(predictions, targets_batch) * inputs_bacth.shape[0]
+            total_samples += inputs_bacth.shape[0]
+
+    avg_accuracy = total_accuracy / total_samples
     #######################
     # END OF YOUR CODE    #
     #######################
@@ -135,6 +151,7 @@ def train(hidden_dims, lr, use_batch_norm, batch_size, epochs, seed, data_dir):
 
     # Set default device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
     # Loading the dataset
     cifar10 = cifar10_utils.get_cifar10(data_dir)
@@ -146,15 +163,63 @@ def train(hidden_dims, lr, use_batch_norm, batch_size, epochs, seed, data_dir):
     #######################
 
     # TODO: Initialize model and loss module
-    model = ...
-    loss_module = ...
+    model = MLP(32*32*3, hidden_dims, 10, use_batch_norm).to(device)
+    loss_module = nn.CrossEntropyLoss().to(device)
+
     # TODO: Training loop including validation
+    val_accuracies = []
+    best_model = None
+    best_val_accuracy = 0
+
     # TODO: Do optimization with the simple SGD optimizer
-    val_accuracies = ...
-    # TODO: Test best model
-    test_accuracy = ...
+    optimizer = optim.SGD(model.parameters(), lr=lr)
+
     # TODO: Add any information you might want to save for plotting
-    logging_dict = ...
+    logging_dict = {'train_loss': [], 'val_accuracy': []}
+
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss = 0
+        for inputs_batch, targets_batch in tqdm(cifar10_loader["train"], desc=f"Epoch {epoch+1}/{epochs}"):
+            inputs_batch = inputs_batch.reshape(inputs_batch.shape[0], -1).to(device)
+            targets_batch = targets_batch.to(device)
+
+            optimizer.zero_grad()
+            predictions = model(inputs_batch)
+            loss = loss_module(predictions, targets_batch)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+        epoch_loss /= len(cifar10_loader["train"])
+        logging_dict['train_loss'].append(epoch_loss)
+
+        model.eval()
+        val_accuracy = evaluate_model(model, cifar10_loader["validation"])
+        val_accuracies.append(val_accuracy)
+        logging_dict['val_accuracy'].append(val_accuracy)
+
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            best_model = deepcopy(model)
+
+        print(f"Epoch {epoch+1}/{epochs} - Loss: {epoch_loss:.4f} - Validation accuracy: {val_accuracy:.4f}")
+
+    # TODO: Test best model
+    test_accuracy = evaluate_model(best_model, cifar10_loader["test"])
+    print(f"Best Model Validation Accuracy: {best_val_accuracy:.4f}")
+    print(f"Test Accuracy of Best Model: {test_accuracy:.4f}")
+
+    plt.figure()
+    plt.plot(logging_dict['train_loss'], label='Train Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    if use_batch_norm:
+        plt.savefig('train_loss_pytorch_BN.png')
+    else:
+        plt.savefig('train_loss_pytorch.png')
+
     #######################
     # END OF YOUR CODE    #
     #######################

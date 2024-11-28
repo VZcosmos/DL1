@@ -44,13 +44,25 @@ class LinearModule(object):
 
         # Note: For the sake of this assignment, please store the parameters
         # and gradients in this format, otherwise some unit tests might fail.
-        self.params = {'weight': None, 'bias': None} # Model parameters
-        self.grads = {'weight': None, 'bias': None} # Gradients
+        # self.params = {'weight': None, 'bias': None} # Model parameters
+        # self.grads = {'weight': None, 'bias': None} # Gradients
 
         #######################
         # PUT YOUR CODE HERE  #
         #######################
 
+        # For the input layer, we use the Xavier initialization, for the other layers we use the Kaiming initialization
+        if input_layer:
+            self.params = {'weight': np.random.randn(out_features, in_features) * np.sqrt(1/in_features), 
+                           'bias': np.zeros(out_features)}
+        else:
+            self.params = {'weight': np.random.randn(out_features, in_features) * np.sqrt(2/in_features), 
+                           'bias': np.zeros(out_features)}
+
+        self.grads = {'weight': np.zeros((out_features, in_features)), 
+                      'bias': np.zeros(out_features)}
+
+        self.cache = None
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -73,7 +85,9 @@ class LinearModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
+        self.cache = x
 
+        out = np.dot(x, self.params['weight'].T) + self.params['bias']
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -97,7 +111,12 @@ class LinearModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
+        x = self.cache
 
+        self.grads['weight'] = np.dot(dout.T, x)
+        self.grads['bias'] = np.sum(dout, axis=0)
+
+        dx = np.dot(dout, self.params['weight'])
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -114,7 +133,7 @@ class LinearModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-        pass
+        self.cache = None
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -146,7 +165,9 @@ class ELUModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
+        self.cache = x
 
+        out = np.where(x > 0, x, self.alpha * (np.exp(x) - 1))
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -168,7 +189,9 @@ class ELUModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
+        x = self.cache
 
+        dx = np.where(x > 0, dout, dout * self.alpha * np.exp(x))
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -185,7 +208,7 @@ class ELUModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-        pass
+        self.cache = None
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -215,6 +238,12 @@ class SoftMaxModule(object):
         # PUT YOUR CODE HERE  #
         #######################
 
+        # Max trick
+        x_max = np.max(x, axis=1, keepdims=True)
+        exp_x = np.exp(x - x_max)
+        out = exp_x / np.sum(exp_x, axis=1, keepdims=True)
+
+        self.cache = out
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -236,7 +265,9 @@ class SoftMaxModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
+        out = self.cache
 
+        dx = out * (dout - np.sum(out * dout, axis=1, keepdims=True))
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -254,7 +285,7 @@ class SoftMaxModule(object):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-        pass
+        self.cache = None
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -282,6 +313,15 @@ class CrossEntropyModule(object):
         # PUT YOUR CODE HERE  #
         #######################
 
+        # Avoid log(0)
+        epsilon = 1e-12
+        x = np.clip(x, epsilon, 1. - epsilon)
+
+        # Check if y is one-hot encoded
+        if y.ndim == 1:
+            y = np.eye(x.shape[1])[y] 
+
+        out = -np.sum(y * np.log(x))/x.shape[0]
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -305,6 +345,11 @@ class CrossEntropyModule(object):
         # PUT YOUR CODE HERE  #
         #######################
 
+        # Check if y is one-hot encoded
+        if y.ndim == 1:
+            y = np.eye(x.shape[1])[y] 
+
+        dx = -y/x/x.shape[0]
         #######################
         # END OF YOUR CODE    #
         #######################

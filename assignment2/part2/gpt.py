@@ -41,7 +41,10 @@ class RMSNorm(nn.Module):
 
     def forward(self, x):
         # Compute the norm of the input tensor and divide by the norm
+        output = x / torch.sqrt(1 / (x.size(-1)) * torch.sum(x**2, dim=-1, keepdim=True) + self.eps)
         # Scale the normalized tensor by the learned weight parameter
+        # (dim,) * (B, T, dim) -> (B, T, dim)
+        output = self.weight * output
         return output
 
 class CausalSelfAttention(nn.Module):
@@ -109,19 +112,33 @@ class CausalSelfAttention(nn.Module):
             Tuple[torch.Tensor, torch.Tensor]: Tuple containing the modified query and key tensors.
         """
         # Generate RoPE embeddings dynamically based on T
-        seq_pos = ...  # Shape: (T)
-        freqs = ...    # Shape: (T, dim // 2)
-        pos_emb = ...  # Shape: (1, 1, T, dim)
+        # Shape: (T)
+        seq_pos = torch.arange(T, device=xq.device, dtype=xq.dtype)
+        # Shape: (T, dim // 2)
+        # (dim//2, ) -> (1, dim//2), (T,) -> (T, 1)
+        # (1, dim//2) * (T, 1) -> (T, dim//2)
+        self.inv_freq = self.inv_freq.to(xq.device)  
+        freqs = self.inv_freq.unsqueeze(0) * seq_pos.unsqueeze(1)
+        # Shape: (1, 1, T, dim)
+        # concatenate sin and cos components along the last dimension
+        # [f11, f12] -> [f11, f12, f11, f12]
+        # pos_emb = torch.cat((freqs, freqs), dim=1).reshape(1, 1, T, -1)
+        pos_emb = freqs.unsqueeze(0).unsqueeze(0)
         
         # Split pos into sin and cos components, repeating each to match xq and xk dimensions
-        pos_sin = ...
-        pos_cos = ...
+        pos_sin = pos_emb.sin()
+        pos_cos = pos_emb.cos()
         
         # Apply RoPE transformation: pair and rotate dimensions
         # Rotate query and key tensors
-        xq_rot = ...
-        xk_rot = ...
-        raise NotImplementedError
+        # [x_even, x_odd] = [x_even * cos - x_odd * sin, x_even * sin + x_odd * cos]
+        # torch.stack & flatten will achive the order of [even, odd, even, odd, ...]
+        xq_rot = torch.stack((xq[..., 0::2] * pos_cos - xq[..., 1::2] * pos_sin, 
+                            xq[..., 0::2] * pos_sin + xq[..., 1::2] * pos_cos), dim=-1).flatten(-2)
+        
+        xk_rot = torch.stack((xk[..., 0::2] * pos_cos - xk[..., 1::2] * pos_sin,
+                            xk[..., 0::2] * pos_sin + xk[..., 1::2] * pos_cos), dim=-1).flatten(-2)
+        
         
         return xq_rot, xk_rot
         
@@ -130,11 +147,8 @@ class CausalSelfAttention(nn.Module):
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         # Split output of attention-head in query, key and value
-        q, k ,v  = ...
-
-        q = ...
-        k = ...
-        v = ...
+        # (B, T, 3*C) -> (B, T, n_head, 3, C//n_head) -> (3, B, n_head, T, C//n_head) -> (B, n_head, T, C//n_head)
+        q, k ,v  = self.c_attn(x).view(B, T, self.n_head, 3, C // self.n_head).permute(3, 0, 2, 1, 4)
 
         if not self.config.abs_emb:
             q, k = self.apply_rotary_emb(q, k, T)
@@ -144,13 +158,22 @@ class CausalSelfAttention(nn.Module):
         # Mask the calculated attention weights with the mask parameter.
 
         if self.use_flash_attn:
-            y = ...
+            additive_mask = self.mask.masked_fill(self.mask == 0, float('-inf')).masked_fill(self.mask == 1, 0)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=additive_mask, dropout_p=self.attn_dropout.p if self.training else 0.0)
         else:
             # Compute attention scores
-            att = ... 
+            # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+            att = torch.matmul(q, k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+
             # Apply causal mask
+            # (1, 1, T, T)
+            assert T > 0, f"Invalid sequence length T: {T}"
+            mask = torch.tril(torch.ones(T, T, dtype=att.dtype)).view(1, 1, T, T).to(att.device)
+            att = att.masked_fill(mask == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
             # Apply attention to the values
-            y = ... # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = torch.matmul(self.attn_dropout(att), v)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -183,10 +206,21 @@ class TransformerDecoderBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
         # Initialize the layers
-        raise NotImplementedError
+        self.layer_norm_1 = RMSNorm(config.n_embd)
+        self.self_attention = CausalSelfAttention(config)
+        self.layer_norm_2 = RMSNorm(config.n_embd)
+        self.mlpf = nn.Sequential(
+            nn.Linear(config.n_embd, 4 * config.n_embd),
+            BERTGELU(),
+            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Dropout(config.resid_pdrop)
+        )
     def forward(self, x):
         # Forward pass through the Decoder Layer
-        out = ...
+        # add skip connection
+        out = x + self.self_attention(self.layer_norm_1(x))
+        # add skip connection
+        out = out + self.mlpf(self.layer_norm_2(out))
         return out
 
 
@@ -391,7 +425,8 @@ class GPT(nn.Module):
         # Forward token and position embedders
         # token embeddings of shape (b, t, n_embd)
         # apply dropout to the tokens
-        tok_emb = ...
+        tok_emb = self.transformer.w_token_emb(idx)
+        tok_emb = self.transformer.drop(tok_emb)
 
         if self.config.abs_emb:
             pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0) # shape (1, t)
@@ -401,8 +436,11 @@ class GPT(nn.Module):
             x = tok_emb
 
         # Iterate through the transformer blocks
+        for block in self.transformer.h:
+            x = block(x)
+
         # Apply final layer normalization and linear layer to produce logits
-        logits = ...
+        logits = self.lm_head(self.transformer.ln_f(x))
 
         return logits
 
@@ -445,24 +483,38 @@ class GPT(nn.Module):
             idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
 
             # forward the model to get the logits for the index in the sequence
+            logits = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
-
+            logits = logits[:, -1, :] / temperature
             if not do_sample:
                 # take the most likely token
-                idx_next = ...
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
             
             else:
                 # apply softmax to convert logits to (normalized) probabilities
-
+                probs = F.softmax(logits, dim=-1)
                 # optionally only consider top-k logits for sampling. 
                 if top_k is not None:
-                    pass
+                    # pick top-k most likely next tokens
+                    probs, idx_topk = probs.topk(top_k, dim=-1)
+                    # set unpicked to zero
+                    probs = torch.zeros_like(probs).scatter(1, idx_topk, probs)
+                    # normalize probabilities
+                    probs /= probs.sum(dim=-1, keepdim=True)
+                    # sample
+                    idx_next = torch.multinomial(probs, num_samples=1)
 
                 # optionally apply top-p sampling
                 if top_p is not None:
-                    pass
-            
+                    # pick the most likely tokens whose cumulative probability mass is less than p
+                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                    sorted_probs[cumulative_probs > top_p] = 0.0
+                    sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
+                    sampled_indices = torch.multinomial(sorted_probs, num_samples=1)
+                    idx_next = sorted_indices.gather(dim=-1, index=sampled_indices)
+
             # append sampled index to the running sequence and continue
-            idx = ...
+            idx = torch.cat((idx, idx_next), dim=1)
 
         return idx

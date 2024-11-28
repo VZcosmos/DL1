@@ -23,6 +23,7 @@ from __future__ import print_function
 
 import torch.nn as nn
 from collections import OrderedDict
+from torch.nn.init import kaiming_normal_
 
 
 class MLP(nn.Module):
@@ -59,7 +60,23 @@ class MLP(nn.Module):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-        pass
+        super(MLP, self).__init__()
+
+        layers = OrderedDict()
+
+        for i, n_hidden_units in enumerate(n_hidden):
+            layers[f'linear_{i}'] = nn.Linear(n_inputs, n_hidden_units)
+            kaiming_normal_(layers[f'linear_{i}'].weight)
+
+            if use_batch_norm:
+                layers[f'batch_norm_{i}'] = nn.BatchNorm1d(n_hidden_units)
+            layers[f'elu_{i}'] = nn.ELU()
+            n_inputs = n_hidden_units
+
+        layers['linear_out'] = nn.Linear(n_inputs, n_classes)
+        kaiming_normal_(layers['linear_out'].weight)
+
+        self.model = nn.Sequential(layers)
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -81,7 +98,7 @@ class MLP(nn.Module):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-
+        out = self.model(x)
         #######################
         # END OF YOUR CODE    #
         #######################
