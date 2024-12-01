@@ -123,6 +123,7 @@ class CausalSelfAttention(nn.Module):
         # concatenate sin and cos components along the last dimension
         # [f11, f12] -> [f11, f12, f11, f12]
         # pos_emb = torch.cat((freqs, freqs), dim=1).reshape(1, 1, T, -1)
+        # after degugging, shape of pos_emb is (1, 1, T, dim//2), not (1, 1, T, dim)
         pos_emb = freqs.unsqueeze(0).unsqueeze(0)
         
         # Split pos into sin and cos components, repeating each to match xq and xk dimensions
@@ -158,8 +159,16 @@ class CausalSelfAttention(nn.Module):
         # Mask the calculated attention weights with the mask parameter.
 
         if self.use_flash_attn:
-            additive_mask = self.mask.masked_fill(self.mask == 0, float('-inf')).masked_fill(self.mask == 1, 0)
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=additive_mask, dropout_p=self.attn_dropout.p if self.training else 0.0)
+                seq_len = T  
+                self.mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.float32)).view(1, 1, seq_len, seq_len).to(q.device)
+                additive_mask = self.mask[:, :, :T, :T]  
+                additive_mask = additive_mask.masked_fill(additive_mask == 0, float('-inf')).masked_fill(additive_mask == 1, 0)
+
+                y = F.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=additive_mask,
+                    dropout_p=self.attn_dropout.p if self.training else 0.0
+                )
         else:
             # Compute attention scores
             # (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
@@ -444,113 +453,88 @@ class GPT(nn.Module):
 
         return logits
 
-    # @torch.inference_mode()
-    # def generate(self, idx: torch.LongTensor, max_new_tokens: int, temperature:float = 1.0, do_sample:bool = False, top_k:int = None, top_p: float = 0.6):
-    #     """
-    #     Generates a sequence of tokens by autoregressively predicting new tokens based on the 
-    #     provided context (idx). The generation process can be controlled by temperature, sampling 
-    #     strategy, and a top-k filtering of the logits.
-
-    #     This method is typically used in a language model to extend a given sequence of token indices 
-    #     with new, plausible tokens. It's important to use this method in the `eval()` mode of the model 
-    #     to disable dropout and other training-specific behaviors for more predictable outputs.
-
-    #     Parameters:
-    #         idx (torch.LongTensor): A tensor of token indices of shape (batch size, sequence length) 
-    #                                 used as the initial context for generation.
-    #         max_new_tokens (int): The maximum number of new tokens to generate.
-    #         temperature (float, optional): A scaling factor to control the randomness of predictions by 
-    #                                         scaling the logits before applying softmax. Higher values 
-    #                                         increase diversity, lower values make the model more confident 
-    #                                         in its top choices. Default is 1.0.
-    #         do_sample (bool, optional): If True, samples from the probability distribution of the 
-    #                                     predicted tokens, otherwise takes the most likely token. 
-    #                                     Default is False.
-    #         top_k (int, optional): If set, only the top-k most likely next tokens are considered for 
-    #                                 sampling at each step. If None, all tokens are considered. 
-    #                                 Default is None.
-    #         top_p (float, optional): If set, only the most likely tokens whose cumulative probability 
-    #                                 mass is less than p are considered for sampling at each step. 
-    #                                 If None, all tokens are considered. Default is 0.6.
-
-    #     Returns:
-    #         torch.LongTensor: The tensor of token indices including the original and the newly generated 
-    #                             tokens, with shape (batch size, sequence length + max_new_tokens).
-    #     """
-    #     assert not (top_k and top_p), "You can only use one of top_k or top_p sampling"
-    #     for _ in range(max_new_tokens):
-    #         # if the sequence context is growing too long we must crop it at block_size
-    #         idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
-
-    #         # forward the model to get the logits for the index in the sequence
-    #         logits = self(idx_cond)
-    #         # pluck the logits at the final step and scale by desired temperature
-    #         logits = logits[:, -1, :] / temperature
-    #         if not do_sample:
-    #             # take the most likely token
-    #             idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-            
-    #         else:
-    #             # apply softmax to convert logits to (normalized) probabilities
-    #             probs = F.softmax(logits, dim=-1)
-    #             # optionally only consider top-k logits for sampling. 
-    #             if top_k is not None:
-    #                 # pick top-k most likely next tokens
-    #                 probs, idx_topk = probs.topk(top_k, dim=-1)
-    #                 # set unpicked to zero
-    #                 probs = torch.zeros_like(probs).scatter(1, idx_topk, probs)
-    #                 # normalize probabilities
-    #                 probs /= probs.sum(dim=-1, keepdim=True)
-    #                 # sample
-    #                 idx_next = torch.multinomial(probs, num_samples=1)
-
-    #             # optionally apply top-p sampling
-    #             if top_p is not None:
-    #                 # pick the most likely tokens whose cumulative probability mass is less than p
-    #                 sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-    #                 cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-    #                 sorted_probs[cumulative_probs > top_p] = 0.0
-    #                 sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
-    #                 sampled_indices = torch.multinomial(sorted_probs, num_samples=1)
-    #                 idx_next = sorted_indices.gather(dim=-1, index=sampled_indices)
-
-    #         # append sampled index to the running sequence and continue
-    #         idx = torch.cat((idx, idx_next), dim=1)
-
-    #     return idx
-
     @torch.inference_mode()
-    def generate(self, idx: torch.LongTensor, max_new_tokens: int, temperature: float = 1.0,
-                do_sample: bool = False, top_k: int = None, top_p: float = 0.6):
+    def generate(self, idx: torch.LongTensor, max_new_tokens: int, temperature:float = 1.0, do_sample:bool = False, top_k:int = None, top_p: float = 0.6):
+        """
+        Generates a sequence of tokens by autoregressively predicting new tokens based on the 
+        provided context (idx). The generation process can be controlled by temperature, sampling 
+        strategy, and a top-k filtering of the logits.
+
+        This method is typically used in a language model to extend a given sequence of token indices 
+        with new, plausible tokens. It's important to use this method in the `eval()` mode of the model 
+        to disable dropout and other training-specific behaviors for more predictable outputs.
+
+        Parameters:
+            idx (torch.LongTensor): A tensor of token indices of shape (batch size, sequence length) 
+                                    used as the initial context for generation.
+            max_new_tokens (int): The maximum number of new tokens to generate.
+            temperature (float, optional): A scaling factor to control the randomness of predictions by 
+                                            scaling the logits before applying softmax. Higher values 
+                                            increase diversity, lower values make the model more confident 
+                                            in its top choices. Default is 1.0.
+            do_sample (bool, optional): If True, samples from the probability distribution of the 
+                                        predicted tokens, otherwise takes the most likely token. 
+                                        Default is False.
+            top_k (int, optional): If set, only the top-k most likely next tokens are considered for 
+                                    sampling at each step. If None, all tokens are considered. 
+                                    Default is None.
+            top_p (float, optional): If set, only the most likely tokens whose cumulative probability 
+                                    mass is less than p are considered for sampling at each step. 
+                                    If None, all tokens are considered. Default is 0.6.
+
+        Returns:
+            torch.LongTensor: The tensor of token indices including the original and the newly generated 
+                                tokens, with shape (batch size, sequence length + max_new_tokens).
+        """
         assert not (top_k and top_p), "You can only use one of top_k or top_p sampling"
 
-        # Check input shape
-        assert len(idx.shape) == 2, f"Input idx must have shape (batch_size, sequence_length), but got {idx.shape}"
+        # switch to eval mode
+        self.eval()
 
         for _ in range(max_new_tokens):
-            # Crop context
+            # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
-            assert idx_cond.shape[1] <= self.block_size, f"Sequence length exceeds block size: {idx_cond.shape[1]} > {self.block_size}"
 
-            # Forward model
+            # forward the model to get the logits for the index in the sequence
             logits = self(idx_cond)
-            assert len(logits.shape) == 3, f"Expected logits to have 3 dimensions, but got {logits.shape}"
-
-            # Select last step logits
+            # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
-            assert logits.shape == (idx.shape[0], logits.shape[-1]), \
-                f"Logits shape mismatch: expected ({idx.shape[0]}, vocab_size), got {logits.shape}"
-
             if not do_sample:
+                # take the most likely token
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+            
             else:
+                # apply softmax to convert logits to (normalized) probabilities
                 probs = F.softmax(logits, dim=-1)
-                idx_next = torch.multinomial(probs, num_samples=1)
+                # optionally only consider top-k logits for sampling. 
+                if top_k is not None:
+                    # pick top-k most likely next tokens
+                    probs, idx_topk = probs.topk(top_k, dim=-1)
+                    # set unpicked to zero
+                    probs = torch.zeros_like(probs).scatter(1, idx_topk, probs)
+                    # normalize probabilities
+                    probs /= probs.sum(dim=-1, keepdim=True)
+                    # sample
+                    idx_next = torch.multinomial(probs, num_samples=1)
 
-            # Check next token shape
-            assert idx_next.shape == (idx.shape[0], 1), f"Next token index shape mismatch: {idx_next.shape}"
+                # optionally apply top-p sampling
+                if top_p is not None:
+                    # pick the most likely tokens whose cumulative probability mass is less than top_p
+                    sorted_probs, sorted_indices = torch.sort(probs, descending=False)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                    # remove the smallest probabilities whose cumulative sum is less than or equal to 1 - top_p
+                    mask = cumulative_probs <= (1 - top_p)
+                    sorted_probs[mask] = 0.0
+                    sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
+                    sampled_indices = torch.multinomial(sorted_probs, num_samples=1)
+                    idx_next = sorted_indices.gather(dim=-1, index=sampled_indices)
 
-            # Concatenate generated token
+            # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
+        # switch back to train mode
+        self.train()
+
         return idx
+
+    
