@@ -70,10 +70,23 @@ class VAE(pl.LightningModule):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-        L_rec = None
-        L_reg = None
-        bpd = None
-        raise NotImplementedError
+        mean, log_std = self.encoder(imgs) # [B,z_dim]
+        z = sample_reparameterize(mean, torch.exp(log_std)) # [B,z_dim]
+        logits = self.decoder(z) # [B,16,H,W]
+
+        # F.cross_entropy will do the Softmax
+        L_rec = F.cross_entropy(logits, imgs.squeeze(1).long(), reduction='none')  # [B, H, W]
+        L_rec = L_rec.view(L_rec.shape[0], -1).sum(dim=-1)  # sum over pixels, shape: [B]
+
+        L_reg = KLD(mean, log_std)  # [B]
+
+        elbo = L_rec + L_reg # [B]
+        bpd = elbo_to_bpd(elbo, imgs.shape)
+
+        L_rec = L_rec.mean() # scalar
+        L_reg = L_reg.mean() # scalar
+        bpd = bpd.mean() # scalar
+        # raise NotImplementedError
         #######################
         # END OF YOUR CODE    #
         #######################
@@ -91,8 +104,14 @@ class VAE(pl.LightningModule):
         #######################
         # PUT YOUR CODE HERE  #
         #######################
-        x_samples = None
-        raise NotImplementedError
+        # sample z from N(0,1)
+        z = torch.randn(batch_size, self.hparams.z_dim, device=self.device) # [B,z_dim]
+        logits = self.decoder(z) # [B,16,H,W]
+        probs = F.softmax(logits, dim=1) # [B,16,H,W]
+        probs = probs.permute(0, 2, 3, 1).reshape(-1, probs.shape[1]) # [B*H*W,16]
+        x_samples = torch.multinomial(probs, 1).reshape(batch_size, 1, logits.shape[2], logits.shape[3]) # [B,1,H,W]
+
+        # raise NotImplementedError
         #######################
         # END OF YOUR CODE    #
         #######################
