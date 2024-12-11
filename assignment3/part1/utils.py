@@ -119,13 +119,13 @@ def visualize_manifold(decoder, grid_size=20):
     z = normal.icdf(percentiles)
 
     z1, z2 = torch.meshgrid(z, z)
-    z = torch.stack([z1.flatten(), z2.flatten()], dim=-1).to(decoder.device)
+    z = torch.stack([z1.flatten(), z2.flatten()], dim=-1).to(decoder.device) # [grid_size**2, 2]
 
-    with torch.no_grad():
-        imgs = decoder(z)
-        imgs = torch.softmax(imgs, dim=1)
+    imgs = decoder(z) # [grid_size**2, 16, H, W]
+    imgs = torch.softmax(imgs, dim=1).argmax(dim=1,keepdim=True) # [grid_size**2, 1, H, W]
 
-    img_grid = make_grid(imgs, nrow=grid_size, padding=0, normalize=True)
+    img_grid = make_grid(imgs, nrow=grid_size, padding=0, normalize=False) # [1, H_total, W_total]
+    img_grid = img_grid.float() 
     # raise NotImplementedError
     #######################
     # END OF YOUR CODE    #
