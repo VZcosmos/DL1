@@ -30,7 +30,9 @@ def fgsm_attack(image, data_grad, epsilon = 0.25):
     # Get the sign of the data gradient (element-wise)
     # Create the perturbed image, scaled by epsilon
     # Make sure values stay within valid range
-    raise NotImplementedError()
+    perturbed_image = image + epsilon * data_grad.sign()
+    perturbed_image = torch.clamp(perturbed_image, 0, 1)
+    # raise NotImplementedError()
     return perturbed_image
 
 
@@ -46,7 +48,20 @@ def fgsm_loss(model, criterion, inputs, labels, defense_args, return_preds = Tru
     # Combine the two losses
     # Hint: the inputs are used in two different forward passes,
     # so you need to make sure those don't clash
-    raise NotImplementedError()
+    original_outputs = model(inputs)
+    original_loss = criterion(original_outputs, labels)
+
+    model.zero_grad()
+    original_loss.backward(retain_graph=True)
+
+    data_grad = inputs.grad.data
+    perturbed_image = fgsm_attack(inputs, data_grad, epsilon=epsilon)
+    perturbed_outputs = model(perturbed_image)
+    perturbed_loss = criterion(perturbed_outputs, labels)
+
+    loss = alpha * original_loss + (1 - alpha) * perturbed_loss
+
+    # raise NotImplementedError()
     if return_preds:
         _, preds = torch.max(original_outputs, 1)
         return loss, preds
@@ -66,7 +81,26 @@ def pgd_attack(model, data, target, criterion, args):
     # Hint: to make sure to each time get a new detached copy of the data,
     # to avoid accumulating gradients from previous iterations
     # Hint: it can be useful to use toch.nograd()
-    raise NotImplementedError()     
+    original_data = data.detach().clone()
+    perturbed_data = data.detach().clone()
+    perturbed_data.requires_grad = True
+
+    for i in range(num_iter):
+        outputs = model(perturbed_data)
+        loss = criterion(outputs, target)
+
+        model.zero_grad()
+        loss.backward()
+
+        with torch.no_grad():
+            perturbed_data += alpha * perturbed_data.grad.sign()
+            
+            delta = torch.clamp(perturbed_data - original_data, -epsilon, epsilon)
+            perturbed_data = torch.clamp(original_data + delta, 0, 1)
+            
+        perturbed_data.requires_grad = True
+
+    # raise NotImplementedError()     
     return perturbed_data
 
 
@@ -92,12 +126,18 @@ def test_attack(model, test_loader, attack_function, attack_args):
             # Get the correct gradients wrt the data
             # Perturb the data using the FGSM attack
             # Re-classify the perturbed image
-            raise NotImplementedError()
+            loss.backward()
+            data_grad = data.grad.data # grad.data won't be tracked by autograd
+            perturbed_data = fgsm_attack(data, data_grad, epsilon=attack_args[EPSILON])
+            output = model(perturbed_data)
+            # raise NotImplementedError()
 
         elif attack_function == PGD:
             # Get the perturbed data using the PGD attack
             # Re-classify the perturbed image
-            raise NotImplementedError()
+            perturbed_data = pgd_attack(model, data, target, criterion, attack_args)
+            output = model(perturbed_data)
+            # raise NotImplementedError()
         else:
             print(f"Unknown attack {attack_function}")
 
